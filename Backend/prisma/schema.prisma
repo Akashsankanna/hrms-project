@@ -1,0 +1,742 @@
+// HRMS Phase 1 - Complete Prisma Schema
+// Two Elephants Technologies LLP | v1.0 | April 2026
+// Modules: Lookup & Reference | Auth & System | Organisation Masters
+//          Employee Core & Profile | Attendance Management
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MODULE 1 — LOOKUP & REFERENCE (5 Tables)
+// ─────────────────────────────────────────────────────────────────────────────
+
+model LkpCategory {
+  id          Int        @id @default(autoincrement())
+  code        String     @unique                        // GENDER, BLOOD_GROUP, EMP_TYPE …
+  description String
+  isActive    Boolean    @default(true)
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+
+  values      LkpValue[]
+
+  @@map("lkp_categories")
+}
+
+model LkpValue {
+  id         Int         @id @default(autoincrement())
+  categoryId Int
+  code       String                                     // MALE, FEMALE, A_POS …
+  label      String                                     // Male, Female, A+ …
+  sortOrder  Int         @default(0)
+  isActive   Boolean     @default(true)
+  metadata   Json?
+  createdAt  DateTime    @default(now())
+  updatedAt  DateTime    @updatedAt
+
+  category   LkpCategory @relation(fields: [categoryId], references: [id])
+
+  // Employees using this value via various FK fields
+  genderEmployees          Employee[]               @relation("EmployeeGender")
+  empTypeEmployees         Employee[]               @relation("EmployeeEmpType")
+  maritalStatusDetails     EmployeePersonalDetail[] @relation("PersonalMaritalStatus")
+  bloodGroupDetails        EmployeePersonalDetail[] @relation("PersonalBloodGroup")
+  addressTypeDetails       EmployeeAddressDetail[]  @relation("AddressType")
+  identityTypeDetails      EmployeeIdentityDetail[] @relation("IdentityType")
+  documentTypeDetails      EmployeeDocument[]       @relation("DocumentType")
+  shiftTypeShifts          Shift[]                  @relation("ShiftType")
+
+  @@unique([categoryId, code])
+  @@map("lkp_values")
+}
+
+model Country {
+  id        Int     @id @default(autoincrement())
+  isoCode   String  @unique   // IN, US, GB
+  name      String
+  phoneCode String            // +91, +1
+  isActive  Boolean @default(true)
+
+  states    State[]
+
+  @@map("countries")
+}
+
+model State {
+  id        Int     @id @default(autoincrement())
+  countryId Int
+  name      String
+  code      String            // MH, KA, DL
+  isActive  Boolean @default(true)
+
+  country   Country @relation(fields: [countryId], references: [id])
+  cities    City[]
+  addresses EmployeeAddressDetail[]
+
+  @@unique([countryId, code])
+  @@map("states")
+}
+
+model City {
+  id      Int     @id @default(autoincrement())
+  stateId Int
+  name    String
+  isActive Boolean @default(true)
+
+  state           State            @relation(fields: [stateId], references: [id])
+  officeLocations OfficeLocation[]
+  addresses       EmployeeAddressDetail[]
+
+  @@map("cities")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MODULE 2 — AUTH & SYSTEM (5 Tables)
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Role {
+  id          Int      @id @default(autoincrement())
+  name        String   @unique   // Must match Keycloak realm role names exactly
+  description String?
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  users       User[]
+  permissions RolePermission[]
+
+  @@map("roles")
+}
+
+model Permission {
+  id          Int      @id @default(autoincrement())
+  code        String   @unique   // employee.view.all, payroll.approve …
+  module      String             // ATTENDANCE, PAYROLL, LEAVE, KRA, INSURANCE
+  action      String             // view | create | update | delete | approve
+  description String?
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+
+  roles       RolePermission[]
+
+  @@map("permissions")
+}
+
+model RolePermission {
+  roleId       Int
+  permissionId Int
+  assignedAt   DateTime @default(now())
+
+  role       Role       @relation(fields: [roleId], references: [id])
+  permission Permission @relation(fields: [permissionId], references: [id])
+
+  @@id([roleId, permissionId])
+  @@map("role_permissions")
+}
+
+model User {
+  id              Int    @id @default(autoincrement())
+  keycloakId      String    @unique   // Keycloak UUID — critical link between both systems
+  email           String    @unique
+  roleId          Int
+  isActive        Boolean   @default(true)
+  isFirstLogin Boolean @default(true)
+  
+  isEmailVerified Boolean   @default(false)
+  lastLoginAt     DateTime?
+  deletedAt       DateTime?           // Soft delete — filter WHERE deletedAt IS NULL
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  role            Role          @relation(fields: [roleId], references: [id])
+  employee     Employee?
+  loginHistory LoginHistory[]
+
+
+  @@map("users")
+}
+
+model LoginHistory {
+  id         Int      @id @default(autoincrement())
+  userId     Int
+  eventType  String             // LOGIN | LOGOUT | FAILED | LOCKED | PASSWORD_RESET
+  ipAddress  String?
+  userAgent  String?
+  occurredAt DateTime @default(now())  // Indexed DESC for efficient timeline queries
+
+  user       User     @relation(fields: [userId], references: [id])
+
+  @@index([userId, occurredAt(sort: Desc)])
+  @@map("login_history")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MODULE 3 — ORGANISATION MASTERS (4 Tables)
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Department {
+  id               Int     @id @default(autoincrement())
+  code             String  @unique   // ENG, HR, FIN, OPS, SALES
+  name             String
+  parentId         Int?              // NULL for root. Self-ref enables unlimited depth
+  headEmployeeId   Int?           // FK to Employee — set AFTER employees are created
+  costCenter       String?
+  isActive         Boolean @default(true)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  parent       Department?  @relation("DeptHierarchy", fields: [parentId], references: [id])
+  children     Department[] @relation("DeptHierarchy")
+  headEmployee Employee?    @relation("DeptHead", fields: [headEmployeeId], references: [id])
+  employees    Employee[]   @relation("EmployeeDept")
+  designations Designation[]
+
+  calendarEvents   CalendarEvent[]
+
+
+  @@map("departments")
+}
+
+model Designation {
+  id           Int     @id @default(autoincrement())
+  code         String  @unique   // SDE1, SDE2, SSDE, EM, PM, QA1
+  name         String
+  departmentId Int
+  level        Int               // 1–10 seniority scale — used for pay grade matching
+  isActive     Boolean @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  department Department @relation(fields: [departmentId], references: [id])
+  employees  Employee[]
+
+  @@map("designations")
+}
+
+model OfficeLocation {
+  id        Int      @id @default(autoincrement())
+  name      String               // Pune HQ, Bangalore Office, Remote
+  latitude  Decimal  @db.Decimal(10, 7)
+  longitude Decimal  @db.Decimal(10, 7)
+  radiusM   Int      @default(200)  // Geo-fence radius in metres
+  cityId    Int
+  address   String?
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  city            City             @relation(fields: [cityId], references: [id])
+  employees       Employee[]
+  attendanceLogs  AttendanceLog[]
+
+  @@map("office_locations")
+}
+
+model PayGrade {
+  id          Int      @id @default(autoincrement())
+  code        String   @unique    // G1, G2 … G10
+  description String?             // Junior Engineer, Senior Engineer, Tech Lead
+  minCtc      Decimal  @db.Decimal(14, 2)
+  maxCtc      Decimal  @db.Decimal(14, 2)
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  employees Employee[]
+
+  @@map("pay_grades")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MODULE 4 — EMPLOYEE CORE (Hub of the Schema)
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Employee {
+  id                    Int      @id @default(autoincrement())
+  employeeCode         String    @unique     // EMP-0001, EMP-0002 …
+  userId               Int    @unique     // One-to-one with User
+  firstName            String
+  middlename           String
+  lastName             String
+  preferredName        String?
+  workEmail            String    @unique
+  phonePrimary         String?
+  dateOfJoining        DateTime
+  probationEndDate     DateTime?
+  lastWorkingDate      DateTime?
+  reportingManagerId   Int?               // Self-ref FK — builds org tree
+  departmentId         Int?
+  designationId        Int?
+  payGradeId           Int?
+  officeLocationId     Int?
+  genderLkpId          Int?                  // FK to LkpValue (GENDER category)
+  employmentTypeLkpId  Int?                  // FK to LkpValue (EMP_TYPE category)
+  isActive             Boolean   @default(true)
+  deletedAt            DateTime?             // Soft delete
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @updatedAt
+
+  // Auth
+  user               User            @relation(fields: [userId], references: [id])
+
+  // Org structure
+  department         Department?     @relation("EmployeeDept", fields: [departmentId], references: [id])
+  designation        Designation?    @relation(fields: [designationId], references: [id])
+  payGrade           PayGrade?       @relation(fields: [payGradeId], references: [id])
+  officeLocation     OfficeLocation? @relation(fields: [officeLocationId], references: [id])
+
+  // Self-referential reporting chain
+  reportingManager   Employee?  @relation("ReportingChain", fields: [reportingManagerId], references: [id])
+  directReports      Employee[] @relation("ReportingChain")
+
+  // Lookup-driven fields
+  gender             LkpValue?  @relation("EmployeeGender", fields: [genderLkpId], references: [id])
+  employmentType     LkpValue?  @relation("EmployeeEmpType", fields: [employmentTypeLkpId], references: [id])
+
+  // Profile sub-tables
+  personalDetail     EmployeePersonalDetail?
+  addresses          EmployeeAddressDetail[]
+  previousEmployments EmployeePreviousEmployment[]
+  educations         EmployeeEducation[]
+  identities         EmployeeIdentityDetail[]
+  documents          EmployeeDocument[]
+
+  // Attendance
+  shifts             EmployeeShift[]
+  attendanceLogs     AttendanceLog[]
+  attendanceSummaries AttendanceSummary[]
+
+  // Department head ref (inverse)
+  headOfDepartments  Department[] @relation("DeptHead")
+
+  @@map("employees")
+
+  createdEvents    CalendarEvent[]       @relation("EventCreatedBy")
+  eventAttendances EventAttendee[]
+  calendarSync     EmployeeCalendarSync?
+  createdHolidays  Holiday[]             @relation("HolidayCreatedBy")
+
+
+
+  leaveBalances    EmployeeLeaveBalance[]
+ leaveRequests    LeaveRequest[]
+  leaveApprovals   LeaveApproval[]   @relation("LeaveApprover")  
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MODULE 5 — EMPLOYEE PROFILE (6 Sub-tables)
+// ─────────────────────────────────────────────────────────────────────────────
+
+model EmployeePersonalDetail {
+  id                    Int      @id @default(autoincrement())
+  employeeId            Int   @unique
+  maritalStatusLkpId    Int?
+  dateOfBirth           DateTime?
+  bloodGroupLkpId       Int?
+  profilePhotoUrl       String?   // ✅ ADD THIS
+  emergencyContactName  String?
+  emergencyContactPhone String?
+  emergencyRelation     String?
+  nationality           String?  @default("Indian")
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+
+  employee      Employee  @relation(fields: [employeeId], references: [id])
+  maritalStatus LkpValue? @relation("PersonalMaritalStatus", fields: [maritalStatusLkpId], references: [id])
+  bloodGroup    LkpValue? @relation("PersonalBloodGroup", fields: [bloodGroupLkpId], references: [id])
+
+  @@map("employee_personal_details")
+}
+
+model EmployeeAddressDetail {
+  id               Int      @id @default(autoincrement())
+  employeeId       Int
+  addressTypeLkpId Int                // FK to LkpValue (ADDRESS_TYPE: Current/Permanent/Temporary)
+  line1            String
+  line2            String?
+  cityId           Int?
+  stateId          Int?
+  pincode          String?
+  countryCode      String   @default("IN")
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  employee    Employee  @relation(fields: [employeeId], references: [id])
+  addressType LkpValue  @relation("AddressType", fields: [addressTypeLkpId], references: [id])
+  city        City?     @relation(fields: [cityId], references: [id])
+  state       State?    @relation(fields: [stateId], references: [id])
+
+  @@unique([employeeId, addressTypeLkpId])
+  @@map("employee_address_details")
+}
+
+model EmployeePreviousEmployment {
+  id              Int      @id @default(autoincrement())
+  employeeId      Int
+  companyName     String
+  designation     String?
+  startDate       DateTime?
+  endDate         DateTime?
+  reasonForLeaving String?
+  isVerified      Boolean  @default(false)   // HR verification flag
+  verifiedAt      DateTime?
+  verifiedBy      String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  employee Employee @relation(fields: [employeeId], references: [id])
+
+  @@map("employee_previous_employments")
+}
+
+model EmployeeEducation {
+  id           Int      @id @default(autoincrement())
+  employeeId   Int
+  degree       String             // B.Tech, MBA, PhD …
+  institution  String
+  fieldOfStudy String?
+  startYear    Int?
+  endYear      Int?
+  grade        String?
+  isHighest    Boolean  @default(false)  // Flag for highest qualification
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  employee Employee @relation(fields: [employeeId], references: [id])
+  @@map("employee_educations")
+}
+
+model EmployeeIdentityDetail {
+  id                 Int      @id @default(autoincrement())
+  employeeId         Int
+  identityTypeLkpId  Int               // FK to LkpValue (IDENTITY_TYPE: PAN/Aadhaar/Passport …)
+  identityNumber     String            // ENCRYPTED at application layer before storing
+  expiryDate         DateTime?
+  isVerified         Boolean  @default(false)
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  employee     Employee @relation(fields: [employeeId], references: [id])
+  identityType LkpValue @relation("IdentityType", fields: [identityTypeLkpId], references: [id])
+
+  @@unique([employeeId, identityTypeLkpId])
+  @@map("employee_identity_details")
+}
+
+model EmployeeDocument {
+  id              Int      @id @default(autoincrement())
+  employeeId      Int
+  docTypeLkpId    Int               // FK to LkpValue (DOC_TYPE: Offer Letter/Relieving …)
+  fileName        String
+  fileUrl         String            // Object storage URL (S3 / GCS)
+  fileSizeBytes   Int?
+  mimeType        String?
+  description     String? 
+  uploadedBy      String?           // Admin userId who uploaded
+  isActive        Boolean  @default(true)
+  createdAt       DateTime @default(now())
+
+  employee Employee @relation(fields: [employeeId], references: [id])
+  docType  LkpValue @relation("DocumentType", fields: [docTypeLkpId], references: [id])
+
+  @@map("employee_documents")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MODULE 6 — ATTENDANCE MANAGEMENT (4 Tables)
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Shift {
+  id              Int      @id @default(autoincrement())
+  name            String               // Morning Shift, Night Shift, Flexible Work
+  shiftTypeLkpId  Int?                 // FK to LkpValue (SHIFT_TYPE)
+  startTime       String?              // HH:MM:SS — NULL for flexible shifts
+  endTime         String?              // HH:MM:SS
+  graceMinutes    Int      @default(15)
+  halfDayHours    Decimal  @default(4.5)  @db.Decimal(4, 1)
+  fullDayHours    Decimal  @default(9.0)  @db.Decimal(4, 1)
+  isActive        Boolean  @default(true)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  shiftType         LkpValue?         @relation("ShiftType", fields: [shiftTypeLkpId], references: [id])
+  employeeShifts    EmployeeShift[]
+  attendanceSummaries AttendanceSummary[]
+
+  @@map("shifts")
+}
+
+model EmployeeShift {
+  id            Int      @id @default(autoincrement())
+  employeeId    Int
+  shiftId       Int
+  effectiveFrom DateTime
+  effectiveTo   DateTime?   // NULL = currently active shift
+
+  employee Employee @relation(fields: [employeeId], references: [id])
+  shift    Shift    @relation(fields: [shiftId], references: [id])
+
+  @@index([employeeId, effectiveTo])
+  @@map("employee_shifts")
+}
+
+model AttendanceLog {
+  id               Int      @id @default(autoincrement())
+  employeeId       Int
+  logDate          DateTime @db.Date
+  punchTime        DateTime
+  punchType        String             // CHECK_IN | CHECK_OUT | BREAK_IN | BREAK_OUT
+  source           String             // WEB | MOBILE | BIOMETRIC | MANUAL
+  latitude         Decimal? @db.Decimal(10, 7)
+  longitude        Decimal? @db.Decimal(10, 7)
+  officeLocationId Int?               // Matched office (if within geo-fence)
+  isWithinGeofence Boolean?
+  isRegularized    Boolean  @default(false)  // TRUE if HR manually corrected
+  regularizedBy    String?
+  regularizedAt    DateTime?
+  remarks          String?
+  ipAddress        String?
+  deviceInfo       Json?              // OS, device model, app version
+  createdAt        DateTime @default(now())
+
+  employee       Employee        @relation(fields: [employeeId], references: [id])
+  officeLocation OfficeLocation? @relation(fields: [officeLocationId], references: [id])
+
+  @@index([employeeId, logDate])
+  @@map("attendance_logs")
+}
+
+model AttendanceSummary {
+  id               Int      @id @default(autoincrement())
+  employeeId       Int
+  attendanceDate   DateTime @db.Date        // One row per employee per day
+  shiftId          Int?
+  firstCheckIn     DateTime?
+  lastCheckOut     DateTime?
+  totalHours       Decimal? @db.Decimal(5, 2)
+  status           String               // PRESENT | ABSENT | HALF_DAY | ON_LEAVE | WFH | HOLIDAY | WEEKEND
+  lateByMinutes    Int?
+  overtimeMinutes  Int?
+  isLocked         Boolean  @default(false)  // TRUE after payroll run — cannot be edited
+  lockedAt         DateTime?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  employee Employee @relation(fields: [employeeId], references: [id])
+  shift    Shift?   @relation(fields: [shiftId], references: [id])
+
+  @@unique([employeeId, attendanceDate])
+  @@index([attendanceDate])
+  @@map("attendance_summaries")
+}
+
+//calenders
+
+model Holiday {
+  id          Int      @id @default(autoincrement())
+  name        String
+  date        DateTime @db.Date
+  type        String   @default("NATIONAL")   // NATIONAL | REGIONAL | OPTIONAL | COMPANY
+  stateCode   String?                          // null = all | "MH" = Maharashtra only
+  description String?
+  isActive    Boolean  @default(true)
+  createdById Int?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  createdBy Employee? @relation("HolidayCreatedBy", fields: [createdById], references: [id])
+
+  @@unique([date, type, stateCode])
+  @@index([date])
+  @@map("holidays")
+}
+
+model CalendarEvent {
+  id             Int      @id @default(autoincrement())
+  title          String
+  description    String?
+  eventType      String                        // MEETING | TRAINING | COMPANY_EVENT
+                                               // BIRTHDAY | ANNIVERSARY | REMINDER | OTHER
+  startTime      DateTime
+  endTime        DateTime
+  isAllDay       Boolean  @default(false)
+  location       String?
+  meetLink       String?
+  visibility     String   @default("PUBLIC")  // PUBLIC | DEPARTMENT | PRIVATE
+  status         String   @default("ACTIVE")  // ACTIVE | CANCELLED | POSTPONED
+
+  isRecurring    Boolean   @default(false)
+  recurrenceRule String?                       // RRULE: "FREQ=WEEKLY;BYDAY=MO,WE,FR"
+  recurrenceEnd  DateTime?
+  parentEventId  Int?
+
+  createdById    Int
+  departmentId   Int?
+  googleEventId  String?
+  outlookEventId String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  createdBy   Employee       @relation("EventCreatedBy", fields: [createdById], references: [id])
+  department  Department?    @relation(fields: [departmentId], references: [id])
+  parentEvent CalendarEvent?  @relation("RecurringInstances", fields: [parentEventId], references: [id])
+  instances   CalendarEvent[] @relation("RecurringInstances")
+  attendees   EventAttendee[]
+
+  @@index([startTime, endTime])
+  @@index([createdById])
+  @@map("calendar_events")
+}
+
+model EventAttendee {
+  id          Int      @id @default(autoincrement())
+  eventId     Int
+  employeeId  Int
+  isOrganizer Boolean  @default(false)
+  rsvpStatus  String   @default("PENDING")   // PENDING | ACCEPTED | DECLINED | TENTATIVE
+  notifiedAt  DateTime?
+  respondedAt DateTime?
+  createdAt   DateTime @default(now())
+
+  event    CalendarEvent @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  employee Employee      @relation(fields: [employeeId], references: [id])
+
+  @@unique([eventId, employeeId])
+  @@index([employeeId])
+  @@map("event_attendees")
+}
+
+model EmployeeCalendarSync {
+  id           Int      @id @default(autoincrement())
+  employeeId   Int      @unique
+  provider     String                         // GOOGLE | OUTLOOK
+  accessToken  String
+  refreshToken String
+  tokenExpiry  DateTime?
+  calendarId   String   @default("primary")
+  syncToken    String?
+  lastSyncedAt DateTime?
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  employee Employee @relation(fields: [employeeId], references: [id])
+
+  @@map("employee_calendar_syncs")
+}
+
+model EventReminder {
+  id         Int      @id @default(autoincrement())
+  eventId    Int
+  employeeId Int
+  remindAt   DateTime
+  method     String   @default("EMAIL")       // EMAIL | IN_APP | BOTH
+  isSent     Boolean  @default(false)
+  sentAt     DateTime?
+  createdAt  DateTime @default(now())
+
+  @@index([remindAt, isSent])
+  @@map("event_reminders")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MODULE 7 — LEAVE MANAGEMENT
+// Add these models to the BOTTOM of your prisma/schema.prisma
+// Run: npx prisma migrate dev --name add_leave_module
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ── 1. Leave Types (policy rules) ────────────────────────────────────────────
+model LeaveType {
+  id               Int      @id @default(autoincrement())
+  code             String   @unique   // EL, SL, CL, ML, PL, BL, COL, WFH, LWP
+  name             String             // Earned Leave, Sick Leave …
+  maxDaysPerYear   Decimal  @db.Decimal(5, 1)
+  carryForwardDays Decimal  @default(0) @db.Decimal(5, 1)
+  encashable       Boolean  @default(false)
+  requiresDoc      Boolean  @default(false)  // medical cert for SL
+  applicableGender String   @default("ALL")  // ALL | MALE | FEMALE | OTHER
+  minServiceDays   Int      @default(0)       // eligibility: days since joining
+  isActive         Boolean  @default(true)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  balances  EmployeeLeaveBalance[]
+  requests  LeaveRequest[]
+
+  @@map("leave_types")
+}
+
+// ── 2. Employee Leave Balances (one row per employee per leave type per year) ─
+model EmployeeLeaveBalance {
+  id              Int      @id @default(autoincrement())
+  employeeId      Int
+  leaveTypeId     Int
+  year            Int                // calendar year e.g. 2026
+  openingBalance  Decimal  @default(0) @db.Decimal(5, 1)  // balance at year start
+  accrued         Decimal  @default(0) @db.Decimal(5, 1)  // earned during year
+  carryForwarded  Decimal  @default(0) @db.Decimal(5, 1)  // brought from prev year
+  used            Decimal  @default(0) @db.Decimal(5, 1)  // approved leaves taken
+  encashed        Decimal  @default(0) @db.Decimal(5, 1)  // days encashed
+  lapsed          Decimal  @default(0) @db.Decimal(5, 1)  // lapsed at year-end
+  // closing_balance = openingBalance + accrued + carryForwarded - used - encashed - lapsed
+  // Computed in application layer (Prisma doesn't support GENERATED columns)
+  updatedAt       DateTime @updatedAt
+
+  employee    Employee   @relation(fields: [employeeId], references: [id])
+  leaveType   LeaveType  @relation(fields: [leaveTypeId], references: [id])
+
+  @@unique([employeeId, leaveTypeId, year])
+  @@index([employeeId, year])
+  @@map("employee_leave_balances")
+}
+
+// ── 3. Leave Requests ─────────────────────────────────────────────────────────
+model LeaveRequest {
+  id               Int      @id @default(autoincrement())
+  employeeId       Int
+  leaveTypeId      Int
+  fromDate         DateTime @db.Date
+  toDate           DateTime @db.Date
+  durationDays     Decimal  @db.Decimal(5, 1)   // supports 0.5 for half-day
+  halfDayIndicator String   @default("NONE")    // NONE | FIRST | SECOND
+  reason           String?
+  medicalDocUrl    String?                        // for sick leave
+  status           String   @default("PENDING") // PENDING | APPROVED | REJECTED | CANCELLED | WITHDRAWN
+  appliedAt        DateTime @default(now())
+  cancelledAt      DateTime?
+  cancelReason     String?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  employee   Employee       @relation(fields: [employeeId], references: [id])
+  leaveType  LeaveType      @relation(fields: [leaveTypeId], references: [id])
+  approvals  LeaveApproval[]
+
+  @@index([employeeId, status])
+  @@index([fromDate, toDate])
+  @@map("leave_requests")
+}
+
+// ── 4. Leave Approvals (multi-level chain) ────────────────────────────────────
+model LeaveApproval {
+  id          Int      @id @default(autoincrement())
+  requestId   Int
+  approverId  Int                              // manager or HR employee
+  level       Int      @default(1)            // L1 = direct manager, L2 = HR, L3 = CHRO
+  action      String   @default("PENDING")   // PENDING | APPROVED | REJECTED | ESCALATED
+  comments    String?
+  actionedAt  DateTime?
+  createdAt   DateTime @default(now())
+
+  request   LeaveRequest @relation(fields: [requestId], references: [id], onDelete: Cascade)
+  approver  Employee     @relation("LeaveApprover", fields: [approverId], references: [id])
+
+  @@index([requestId])
+  @@index([approverId, action])
+  @@map("leave_approvals")
+}
